@@ -7,19 +7,23 @@
     android:padding="24dp">
 
     <TextView
-        android:id="@+id/status"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Micrófono de entrada"
+        android:textSize="14sp" />
+
+    <Spinner
+        android:id="@+id/deviceSpinner"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginBottom="24dp"
-        android:gravity="center"
-        android:text="Listo"
-        android:textSize="18sp" />
+        android:minHeight="48dp" />
 
     <Button
         android:id="@+id/btnStart"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Iniciar grabación (SCO)" />
+        android:text="Iniciar grabación" />
 
     <Button
         android:id="@+id/btnStop"
@@ -27,4 +31,13 @@
         android:layout_height="wrap_content"
         android:enabled="false"
         android:text="Detener" />
+
+    <TextView
+        android:id="@+id/status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:gravity="center"
+        android:text="Listo"
+        android:textSize="16sp" />
 </LinearLayout>
