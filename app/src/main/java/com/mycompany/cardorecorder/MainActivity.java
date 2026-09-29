@@ -12,14 +12,18 @@ import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioRecord;
+import android.media.AudioRouting;
+import android.media.MediaPlayer;
 import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.widget.ArrayAdapter;
+import android.view.View;
 import android.widget.Button;
-import android.widget.Spinner;
+import android.widget.ProgressBar;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.TextView;
 
 import java.io.File;
@@ -33,7 +37,6 @@ import java.util.List;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
-    private static final int SAMPLE_RATE = 16000;
     private static final int CHANNEL = AudioFormat.CHANNEL_IN_MONO;
     private static final int ENCODING = AudioFormat.ENCODING_PCM_16BIT;
     private static final int REQ_PERMS = 1;
@@ -41,56 +44,77 @@ public class MainActivity extends Activity {
     // AudioDeviceInfo.TYPE_BLE_HEADSET (API 31)
     private static final int TYPE_BLE_HEADSET = 26;
 
+    private static final int DEVICE_DEFAULT = -1;
+
+    private static final int M_AUTO = 0;
+    private static final int M_COMM = 1;
+    private static final int M_LEGACY = 2;
+    private static final int M_BOTH = 3;
+
     private AudioManager audioManager;
     private AudioRecord recorder;
     private Thread recordThread;
     private volatile boolean isRecording = false;
     private File outputFile;
+    private int sampleRate;
+    private MediaPlayer player;
 
-    // Dispositivo elegido y espera de la línea de voz BT
     private AudioDeviceInfo pendingInput;
     private boolean waitingForLink = false;
     private boolean scoReceiverRegistered = false;
+    private boolean usedComm = false;
+    private boolean usedLegacy = false;
     private Object commListener; // AudioManager.OnCommunicationDeviceChangedListener (API 31+)
+    private AudioRouting.OnRoutingChangedListener routingListener;
 
-    private TextView status;
+    private RadioGroup groupDevice;
+    private RadioGroup groupMethod;
+    private RadioGroup groupSource;
+    private RadioGroup groupRate;
     private Button btnStart;
     private Button btnStop;
-    private Spinner deviceSpinner;
-    private final List<AudioDeviceInfo> inputDevices = new ArrayList<>();
-    private ArrayAdapter<String> deviceAdapter;
+    private Button btnPlay;
+    private Button btnRefresh;
+    private ProgressBar level;
+    private TextView status;
+    private TextView log;
 
+    private final List<AudioDeviceInfo> inputDevices = new ArrayList<>();
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private final Runnable linkTimeout = () -> {
         if (waitingForLink) {
+            log("TIMEOUT esperando línea BT");
             setStatus("La línea de voz Bluetooth no se activó en " + (LINK_TIMEOUT_MS / 1000)
-                    + "s.\nRevisa que el Cardo esté conectado con perfil de llamadas (HFP).");
+                    + "s. Prueba otro método en la sección 2.");
             stopAll();
         }
     };
 
-    // Android < 12: estado de la línea SCO legacy.
     private final BroadcastReceiver scoReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
             int state = intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, -1);
+            log("SCO state = " + scoStateName(state));
             if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED) {
                 onLinkReady();
             }
         }
     };
 
-    // Refresca la lista si se conecta/desconecta un dispositivo.
     private final AudioDeviceCallback deviceCallback = new AudioDeviceCallback() {
         @Override
         public void onAudioDevicesAdded(AudioDeviceInfo[] added) {
-            refreshDevices();
+            if (!isBusy()) {
+                refreshDevices();
+            }
         }
 
         @Override
         public void onAudioDevicesRemoved(AudioDeviceInfo[] removed) {
-            refreshDevices();
+            if (!isBusy()) {
+                refreshDevices();
+            }
         }
     };
 
@@ -100,23 +124,30 @@ public class MainActivity extends Activity {
         setContentView(R.layout.main);
 
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-        status = findViewById(R.id.status);
+        groupDevice = findViewById(R.id.groupDevice);
+        groupMethod = findViewById(R.id.groupMethod);
+        groupSource = findViewById(R.id.groupSource);
+        groupRate = findViewById(R.id.groupRate);
         btnStart = findViewById(R.id.btnStart);
         btnStop = findViewById(R.id.btnStop);
-        deviceSpinner = findViewById(R.id.deviceSpinner);
+        btnPlay = findViewById(R.id.btnPlay);
+        btnRefresh = findViewById(R.id.btnRefresh);
+        level = findViewById(R.id.level);
+        status = findViewById(R.id.status);
+        log = findViewById(R.id.log);
 
-        deviceAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, new ArrayList<>());
-        deviceAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        deviceSpinner.setAdapter(deviceAdapter);
+        buildStaticOptions();
 
+        btnRefresh.setOnClickListener(v -> refreshDevices());
         btnStart.setOnClickListener(v -> {
             if (hasPermissions()) {
-                startWithSelectedDevice();
+                startWithSelection();
             } else {
                 requestPermissions(requiredPermissions(), REQ_PERMS);
             }
         });
         btnStop.setOnClickListener(v -> stopAll());
+        btnPlay.setOnClickListener(v -> togglePlayback());
 
         audioManager.registerAudioDeviceCallback(deviceCallback, handler);
         if (hasPermissions()) {
@@ -124,11 +155,14 @@ public class MainActivity extends Activity {
         } else {
             requestPermissions(requiredPermissions(), REQ_PERMS);
         }
+        log("Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + "), "
+                + Build.MANUFACTURER + " " + Build.MODEL);
     }
 
     @Override
     protected void onDestroy() {
         audioManager.unregisterAudioDeviceCallback(deviceCallback);
+        stopPlayback();
         stopAll();
         super.onDestroy();
     }
@@ -162,57 +196,105 @@ public class MainActivity extends Activity {
         return true;
     }
 
-    // ---------- Selector de dispositivo ----------
+    private boolean isBusy() {
+        return isRecording || waitingForLink;
+    }
+
+    // ---------- Opciones de UI ----------
+
+    private void buildStaticOptions() {
+        boolean s = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S;
+        addRadio(groupMethod, "Automático (recomendado por Android)", M_AUTO, true);
+        if (s) {
+            addRadio(groupMethod, "setCommunicationDevice (Android 12+)", M_COMM, false);
+        }
+        addRadio(groupMethod, "startBluetoothSco (clásico)", M_LEGACY, false);
+        if (s) {
+            addRadio(groupMethod, "Ambos", M_BOTH, false);
+        }
+
+        addRadio(groupSource, "VOICE_COMMUNICATION (llamada)", MediaRecorder.AudioSource.VOICE_COMMUNICATION, true);
+        addRadio(groupSource, "MIC", MediaRecorder.AudioSource.MIC, false);
+        addRadio(groupSource, "VOICE_RECOGNITION", MediaRecorder.AudioSource.VOICE_RECOGNITION, false);
+        addRadio(groupSource, "DEFAULT", MediaRecorder.AudioSource.DEFAULT, false);
+        addRadio(groupSource, "UNPROCESSED", MediaRecorder.AudioSource.UNPROCESSED, false);
+
+        addRadio(groupRate, "8 kHz", 8000, false);
+        addRadio(groupRate, "16 kHz", 16000, true);
+        addRadio(groupRate, "48 kHz", 48000, false);
+    }
+
+    private void addRadio(RadioGroup group, String text, int value, boolean checked) {
+        RadioButton rb = new RadioButton(this);
+        rb.setId(View.generateViewId());
+        rb.setText(text);
+        rb.setTag(value);
+        rb.setMinHeight((int) (48 * getResources().getDisplayMetrics().density));
+        group.addView(rb);
+        if (checked) {
+            group.check(rb.getId());
+        }
+    }
+
+    private int selectedValue(RadioGroup group, int fallback) {
+        View v = group.findViewById(group.getCheckedRadioButtonId());
+        return v != null && v.getTag() instanceof Integer ? (Integer) v.getTag() : fallback;
+    }
+
+    private void setOptionsEnabled(boolean enabled) {
+        for (RadioGroup g : new RadioGroup[]{groupDevice, groupMethod, groupSource, groupRate}) {
+            for (int i = 0; i < g.getChildCount(); i++) {
+                g.getChildAt(i).setEnabled(enabled);
+            }
+        }
+        btnRefresh.setEnabled(enabled);
+    }
 
     private void refreshDevices() {
-        AudioDeviceInfo previous = selectedDevice();
+        int previous = selectedValue(groupDevice, Integer.MIN_VALUE);
+        groupDevice.removeAllViews();
         inputDevices.clear();
-        List<String> labels = new ArrayList<>();
+
+        addRadio(groupDevice, "Por defecto (lo que Android decida)", DEVICE_DEFAULT, previous == DEVICE_DEFAULT);
+        StringBuilder found = new StringBuilder("Entradas:");
         for (AudioDeviceInfo d : audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
+            found.append("\n  id=").append(d.getId()).append(" ").append(label(d));
             if (d.getType() == AudioDeviceInfo.TYPE_TELEPHONY || d.getType() == AudioDeviceInfo.TYPE_FM_TUNER) {
                 continue;
             }
             inputDevices.add(d);
-            labels.add(label(d));
+            addRadio(groupDevice, label(d), d.getId(), d.getId() == previous);
         }
-        deviceAdapter.clear();
-        deviceAdapter.addAll(labels);
-        deviceAdapter.notifyDataSetChanged();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            found.append("\nDispositivos de llamada:");
+            for (AudioDeviceInfo d : audioManager.getAvailableCommunicationDevices()) {
+                found.append("\n  id=").append(d.getId()).append(" ").append(label(d));
+            }
+        }
+        log(found.toString());
 
-        // Mantener la selección previa; si no, preferir Bluetooth.
-        int sel = -1;
-        for (int i = 0; i < inputDevices.size(); i++) {
-            if (previous != null && inputDevices.get(i).getId() == previous.getId()) {
-                sel = i;
-                break;
-            }
+        boolean anyBt = false;
+        for (AudioDeviceInfo d : inputDevices) {
+            anyBt |= isBluetooth(d);
         }
-        if (sel < 0) {
-            for (int i = 0; i < inputDevices.size(); i++) {
-                if (isBluetooth(inputDevices.get(i))) {
-                    sel = i;
-                    break;
-                }
-            }
-        }
-        if (sel >= 0) {
-            deviceSpinner.setSelection(sel);
-        }
-        if (inputDevices.isEmpty()) {
-            setStatus("No hay micrófonos disponibles");
+        if (!anyBt) {
+            setStatus("No aparece ningún micrófono Bluetooth. Revisa que el Cardo tenga "
+                    + "activadas las \"llamadas telefónicas\" en ajustes Bluetooth del teléfono.");
         }
     }
 
     private AudioDeviceInfo selectedDevice() {
-        int pos = deviceSpinner.getSelectedItemPosition();
-        if (pos < 0 || pos >= inputDevices.size()) {
-            return null;
+        int id = selectedValue(groupDevice, DEVICE_DEFAULT);
+        for (AudioDeviceInfo d : inputDevices) {
+            if (d.getId() == id) {
+                return d;
+            }
         }
-        return inputDevices.get(pos);
+        return null;
     }
 
     private static boolean isBluetooth(AudioDeviceInfo d) {
-        return d.getType() == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || d.getType() == TYPE_BLE_HEADSET;
+        return d != null && (d.getType() == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || d.getType() == TYPE_BLE_HEADSET);
     }
 
     private static String label(AudioDeviceInfo d) {
@@ -221,8 +303,17 @@ public class MainActivity extends Activity {
             case AudioDeviceInfo.TYPE_BUILTIN_MIC:
                 type = "Mic del teléfono";
                 break;
+            case AudioDeviceInfo.TYPE_BUILTIN_EARPIECE:
+                type = "Auricular del teléfono";
+                break;
+            case AudioDeviceInfo.TYPE_BUILTIN_SPEAKER:
+                type = "Altavoz del teléfono";
+                break;
             case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
-                type = "Bluetooth (llamada)";
+                type = "Bluetooth llamada (SCO)";
+                break;
+            case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+                type = "Bluetooth música (A2DP)";
                 break;
             case TYPE_BLE_HEADSET:
                 type = "Bluetooth LE";
@@ -234,101 +325,130 @@ public class MainActivity extends Activity {
             case AudioDeviceInfo.TYPE_USB_HEADSET:
                 type = "USB";
                 break;
+            case AudioDeviceInfo.TYPE_TELEPHONY:
+                type = "Telefonía";
+                break;
             default:
                 type = "Tipo " + d.getType();
         }
-        CharSequence name = d.getProductName();
-        String addr = d.getAddress();
         StringBuilder sb = new StringBuilder(type);
+        CharSequence name = d.getProductName();
         if (name != null && name.length() > 0) {
             sb.append(" · ").append(name);
         }
-        if (addr != null && !addr.isEmpty() && d.getType() == AudioDeviceInfo.TYPE_BUILTIN_MIC) {
-            sb.append(" (").append(addr).append(")");
+        String addr = d.getAddress();
+        if (addr != null && !addr.isEmpty()) {
+            sb.append(" [").append(addr).append("]");
         }
         return sb.toString();
     }
 
+    private static String scoStateName(int s) {
+        switch (s) {
+            case AudioManager.SCO_AUDIO_STATE_DISCONNECTED: return "DISCONNECTED";
+            case AudioManager.SCO_AUDIO_STATE_CONNECTED: return "CONNECTED";
+            case AudioManager.SCO_AUDIO_STATE_CONNECTING: return "CONNECTING";
+            case AudioManager.SCO_AUDIO_STATE_ERROR: return "ERROR";
+            default: return String.valueOf(s);
+        }
+    }
+
     // ---------- Arranque ----------
 
-    private void startWithSelectedDevice() {
+    private void startWithSelection() {
+        stopPlayback();
         AudioDeviceInfo input = selectedDevice();
-        if (input == null) {
-            setStatus("Selecciona un micrófono");
-            return;
-        }
+        int method = selectedValue(groupMethod, M_AUTO);
+        sampleRate = selectedValue(groupRate, 16000);
+
         btnStart.setEnabled(false);
         btnStop.setEnabled(true);
-        deviceSpinner.setEnabled(false);
+        btnPlay.setEnabled(false);
+        setOptionsEnabled(false);
         pendingInput = input;
 
+        log("--- Iniciar: mic=" + (input != null ? label(input) : "por defecto")
+                + " método=" + method + " fuente=" + selectedValue(groupSource, -1) + " rate=" + sampleRate);
+
         if (!isBluetooth(input)) {
-            // Mic local / cable / USB: no hace falta abrir línea BT.
-            setStatus("Usando " + label(input));
+            setStatus("Usando " + (input != null ? label(input) : "mic por defecto"));
             startRecording(input);
             return;
         }
 
-        // 1. Abrir la línea de voz Bluetooth con el Cardo y ESPERAR a que esté activa.
         audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+        log("setMode(IN_COMMUNICATION) -> mode=" + audioManager.getMode());
         waitingForLink = true;
         handler.postDelayed(linkTimeout, LINK_TIMEOUT_MS);
         setStatus("Abriendo línea de voz con " + label(input) + "...");
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            AudioDeviceInfo comm = findCommDevice(input);
-            if (comm == null) {
-                waitingForLink = false;
-                handler.removeCallbacks(linkTimeout);
-                setStatus("Android no ofrece " + label(input) + " como dispositivo de llamada.");
-                stopAll();
-                return;
-            }
-            AudioManager.OnCommunicationDeviceChangedListener l = device -> {
-                if (device != null && device.getType() == comm.getType()) {
-                    onLinkReady();
-                }
-            };
-            commListener = l;
-            audioManager.addOnCommunicationDeviceChangedListener(getMainExecutor(), l);
-            if (!audioManager.setCommunicationDevice(comm)) {
-                waitingForLink = false;
-                handler.removeCallbacks(linkTimeout);
-                setStatus("setCommunicationDevice falló para " + label(comm));
-                stopAll();
-                return;
-            }
-            // Puede que ya estuviera activo y no llegue callback.
-            AudioDeviceInfo current = audioManager.getCommunicationDevice();
-            if (current != null && current.getType() == comm.getType()) {
-                handler.postDelayed(this::onLinkReady, 300);
-            }
-        } else {
-            registerReceiver(scoReceiver, new IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED));
-            scoReceiverRegistered = true;
-            audioManager.startBluetoothSco();
-            audioManager.setBluetoothScoOn(true);
+        boolean s = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S;
+        boolean useComm = s && (method == M_AUTO || method == M_COMM || method == M_BOTH);
+        boolean useLegacy = method == M_LEGACY || method == M_BOTH || (method == M_AUTO && !s);
+
+        if (useLegacy) {
+            startLegacySco();
+        }
+        if (useComm && !startCommDevice(input) && !useLegacy) {
+            waitingForLink = false;
+            stopAll();
         }
     }
 
-    // Busca el dispositivo de comunicación (salida) que corresponde al mic elegido.
-    private AudioDeviceInfo findCommDevice(AudioDeviceInfo input) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            return null;
+    private void startLegacySco() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(scoReceiver, new IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED),
+                    Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(scoReceiver, new IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED));
         }
-        AudioDeviceInfo sameType = null;
+        scoReceiverRegistered = true;
+        usedLegacy = true;
+        log("isBluetoothScoAvailableOffCall=" + audioManager.isBluetoothScoAvailableOffCall());
+        audioManager.startBluetoothSco();
+        audioManager.setBluetoothScoOn(true);
+        log("startBluetoothSco() llamado");
+    }
+
+    private boolean startCommDevice(AudioDeviceInfo input) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return false;
+        }
+        AudioDeviceInfo comm = null;
         for (AudioDeviceInfo d : audioManager.getAvailableCommunicationDevices()) {
             if (d.getType() != input.getType()) {
                 continue;
             }
-            if (d.getAddress() != null && d.getAddress().equals(input.getAddress())) {
-                return d;
-            }
-            if (sameType == null) {
-                sameType = d;
+            if (comm == null || (d.getAddress() != null && d.getAddress().equals(input.getAddress()))) {
+                comm = d;
             }
         }
-        return sameType;
+        if (comm == null) {
+            log("No hay dispositivo de llamada tipo " + input.getType());
+            setStatus("Android no ofrece " + label(input) + " como dispositivo de llamada.");
+            return false;
+        }
+        final int commType = comm.getType();
+        AudioManager.OnCommunicationDeviceChangedListener l = device -> {
+            log("CommunicationDevice -> " + (device != null ? label(device) : "null"));
+            if (device != null && device.getType() == commType) {
+                onLinkReady();
+            }
+        };
+        commListener = l;
+        audioManager.addOnCommunicationDeviceChangedListener(getMainExecutor(), l);
+        usedComm = true;
+        boolean ok = audioManager.setCommunicationDevice(comm);
+        log("setCommunicationDevice(" + label(comm) + ") -> " + ok);
+        if (!ok) {
+            setStatus("setCommunicationDevice falló");
+            return false;
+        }
+        AudioDeviceInfo current = audioManager.getCommunicationDevice();
+        if (current != null && current.getType() == commType) {
+            handler.postDelayed(this::onLinkReady, 300);
+        }
+        return true;
     }
 
     private void onLinkReady() {
@@ -337,7 +457,7 @@ public class MainActivity extends Activity {
         }
         waitingForLink = false;
         handler.removeCallbacks(linkTimeout);
-        // Pequeña espera para que el audio SCO se estabilice antes de abrir el mic.
+        log("Línea BT lista; isBluetoothScoOn=" + audioManager.isBluetoothScoOn());
         handler.postDelayed(() -> {
             if (pendingInput != null && !isRecording) {
                 startRecording(findSameInput(pendingInput));
@@ -359,25 +479,36 @@ public class MainActivity extends Activity {
         return sameType != null ? sameType : wanted;
     }
 
-    // 2. Iniciar captura con VOICE_COMMUNICATION y guardar a WAV
     private void startRecording(AudioDeviceInfo input) {
-        int minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, ENCODING);
-        int bufferSize = Math.max(minBuffer, SAMPLE_RATE);
+        int source = selectedValue(groupSource, MediaRecorder.AudioSource.VOICE_COMMUNICATION);
+        int minBuffer = AudioRecord.getMinBufferSize(sampleRate, CHANNEL, ENCODING);
+        if (minBuffer <= 0) {
+            setStatus(sampleRate + " Hz no soportado");
+            stopAll();
+            return;
+        }
+        int bufferSize = Math.max(minBuffer * 2, sampleRate);
         try {
-            recorder = new AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                    SAMPLE_RATE, CHANNEL, ENCODING, bufferSize);
+            recorder = new AudioRecord(source, sampleRate, CHANNEL, ENCODING, bufferSize);
         } catch (SecurityException e) {
             setStatus("Sin permiso de micrófono");
             stopAll();
             return;
         }
         if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
-            setStatus("No se pudo inicializar AudioRecord");
+            setStatus("No se pudo inicializar AudioRecord con esa fuente/frecuencia");
             stopAll();
             return;
         }
-        recorder.setPreferredDevice(input);
+        if (input != null) {
+            boolean ok = recorder.setPreferredDevice(input);
+            log("setPreferredDevice(" + label(input) + ") -> " + ok);
+        }
+        routingListener = router -> {
+            AudioDeviceInfo r = router.getRoutedDevice();
+            log("Ruta cambió -> " + (r != null ? label(r) : "null"));
+        };
+        recorder.addOnRoutingChangedListener(routingListener, handler);
 
         File dir = getExternalFilesDir(null);
         String name = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
@@ -385,11 +516,9 @@ public class MainActivity extends Activity {
 
         recorder.startRecording();
         isRecording = true;
-        final int size = bufferSize;
-        recordThread = new Thread(() -> writeWav(size), "cardo-recorder");
+        recordThread = new Thread(this::writeWav, "cardo-recorder");
         recordThread.start();
 
-        // Mostrar el micrófono por el que realmente entra el audio.
         handler.postDelayed(() -> showRoute(input), 700);
     }
 
@@ -399,22 +528,38 @@ public class MainActivity extends Activity {
         }
         AudioDeviceInfo routed = recorder.getRoutedDevice();
         String routedLabel = routed != null ? label(routed) : "desconocido";
-        boolean ok = routed != null && routed.getType() == wanted.getType();
-        setStatus((ok ? "✅ Grabando desde: " : "⚠️ Pediste " + label(wanted) + "\npero Android enruta a: ")
-                + routedLabel + "\n\n" + outputFile.getAbsolutePath());
+        log("getRoutedDevice -> " + routedLabel);
+        String msg = "Grabando. Android reporta: " + routedLabel
+                + "\nHabla al Cardo y mira si la barra se mueve; luego habla al teléfono con el Cardo lejos.";
+        if (wanted != null && (routed == null || routed.getType() != wanted.getType())) {
+            msg = "⚠️ Pediste " + label(wanted) + "\n" + msg;
+        }
+        setStatus(msg);
     }
 
-    private void writeWav(int bufferSize) {
-        byte[] buffer = new byte[bufferSize];
+    private void writeWav() {
+        int chunk = sampleRate / 20; // ~50 ms
+        short[] samples = new short[chunk];
+        byte[] bytes = new byte[chunk * 2];
         long dataLen = 0;
         try (FileOutputStream out = new FileOutputStream(outputFile)) {
             out.write(new byte[44]); // placeholder del header WAV
             while (isRecording) {
-                int read = recorder.read(buffer, 0, buffer.length);
-                if (read > 0) {
-                    out.write(buffer, 0, read);
-                    dataLen += read;
+                int read = recorder.read(samples, 0, chunk);
+                if (read <= 0) {
+                    continue;
                 }
+                int peak = 0;
+                for (int i = 0; i < read; i++) {
+                    short v = samples[i];
+                    peak = Math.max(peak, Math.abs((int) v));
+                    bytes[i * 2] = (byte) (v & 0xff);
+                    bytes[i * 2 + 1] = (byte) ((v >> 8) & 0xff);
+                }
+                out.write(bytes, 0, read * 2);
+                dataLen += read * 2L;
+                final int pct = Math.min(100, peak * 100 / 32767);
+                level.post(() -> level.setProgress(pct));
             }
         } catch (IOException e) {
             runOnUiThread(() -> setStatus("Error escribiendo: " + e.getMessage()));
@@ -422,26 +567,25 @@ public class MainActivity extends Activity {
         }
         try (RandomAccessFile raf = new RandomAccessFile(outputFile, "rw")) {
             raf.seek(0);
-            raf.write(wavHeader(dataLen));
+            raf.write(wavHeader(dataLen, sampleRate));
         } catch (IOException e) {
             runOnUiThread(() -> setStatus("Error en header WAV: " + e.getMessage()));
         }
     }
 
-    private static byte[] wavHeader(long dataLen) {
+    private static byte[] wavHeader(long dataLen, int rate) {
         int channels = 1;
         int bitsPerSample = 16;
-        long byteRate = (long) SAMPLE_RATE * channels * bitsPerSample / 8;
-        long totalLen = dataLen + 36;
+        long byteRate = (long) rate * channels * bitsPerSample / 8;
         byte[] h = new byte[44];
         h[0] = 'R'; h[1] = 'I'; h[2] = 'F'; h[3] = 'F';
-        putInt(h, 4, totalLen);
+        putInt(h, 4, dataLen + 36);
         h[8] = 'W'; h[9] = 'A'; h[10] = 'V'; h[11] = 'E';
         h[12] = 'f'; h[13] = 'm'; h[14] = 't'; h[15] = ' ';
         putInt(h, 16, 16);          // tamaño subchunk fmt
         h[20] = 1; h[21] = 0;       // PCM
         h[22] = (byte) channels; h[23] = 0;
-        putInt(h, 24, SAMPLE_RATE);
+        putInt(h, 24, rate);
         putInt(h, 28, byteRate);
         h[32] = (byte) (channels * bitsPerSample / 8); h[33] = 0;
         h[34] = (byte) bitsPerSample; h[35] = 0;
@@ -457,10 +601,10 @@ public class MainActivity extends Activity {
         b[off + 3] = (byte) ((v >> 24) & 0xff);
     }
 
-    // ---------- Detener ----------
+    // ---------- Detener / reproducir ----------
 
     private void stopAll() {
-        handler.removeCallbacksAndMessages(null);
+        handler.removeCallbacks(linkTimeout);
         waitingForLink = false;
         pendingInput = null;
         boolean wasRecording = isRecording;
@@ -473,6 +617,10 @@ public class MainActivity extends Activity {
             recordThread = null;
         }
         if (recorder != null) {
+            if (routingListener != null) {
+                recorder.removeOnRoutingChangedListener(routingListener);
+                routingListener = null;
+            }
             try {
                 recorder.stop();
             } catch (IllegalStateException ignored) {
@@ -481,32 +629,73 @@ public class MainActivity extends Activity {
             recorder = null;
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        if (usedComm && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (commListener != null) {
                 audioManager.removeOnCommunicationDeviceChangedListener(
                         (AudioManager.OnCommunicationDeviceChangedListener) commListener);
                 commListener = null;
             }
             audioManager.clearCommunicationDevice();
-        } else {
-            if (scoReceiverRegistered) {
-                unregisterReceiver(scoReceiver);
-                scoReceiverRegistered = false;
-            }
+        }
+        if (usedLegacy) {
             audioManager.setBluetoothScoOn(false);
             audioManager.stopBluetoothSco();
         }
+        if (scoReceiverRegistered) {
+            unregisterReceiver(scoReceiver);
+            scoReceiverRegistered = false;
+        }
+        usedComm = false;
+        usedLegacy = false;
         audioManager.setMode(AudioManager.MODE_NORMAL);
+        level.setProgress(0);
 
         if (wasRecording && outputFile != null) {
             setStatus("Guardado:\n" + outputFile.getAbsolutePath());
+            log("Guardado " + outputFile.getName() + " (" + outputFile.length() / 1024 + " KB)");
         }
         btnStart.setEnabled(true);
         btnStop.setEnabled(false);
-        deviceSpinner.setEnabled(true);
+        btnPlay.setEnabled(outputFile != null && outputFile.exists());
+        setOptionsEnabled(true);
+    }
+
+    private void togglePlayback() {
+        if (player != null) {
+            stopPlayback();
+            return;
+        }
+        if (outputFile == null || !outputFile.exists()) {
+            return;
+        }
+        try {
+            player = new MediaPlayer();
+            player.setDataSource(outputFile.getAbsolutePath());
+            player.setOnCompletionListener(mp -> stopPlayback());
+            player.prepare();
+            player.start();
+            btnPlay.setText("Parar");
+        } catch (IOException e) {
+            setStatus("No se pudo reproducir: " + e.getMessage());
+            stopPlayback();
+        }
+    }
+
+    private void stopPlayback() {
+        if (player != null) {
+            player.release();
+            player = null;
+        }
+        btnPlay.setText("Escuchar");
     }
 
     private void setStatus(String s) {
         status.setText(s);
+    }
+
+    private void log(String s) {
+        String t = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+        String line = t + " " + s + "\n";
+        runOnUiThread(() -> log.append(line));
     }
 }
