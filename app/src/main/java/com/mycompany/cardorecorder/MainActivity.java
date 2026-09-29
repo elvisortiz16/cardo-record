@@ -143,6 +143,11 @@ public class MainActivity extends Activity {
 
         buildStaticOptions();
 
+        View advanced = findViewById(R.id.advanced);
+        CheckBox chkAdvanced = findViewById(R.id.chkAdvanced);
+        chkAdvanced.setOnCheckedChangeListener((b, checked) ->
+                advanced.setVisibility(checked ? View.VISIBLE : View.GONE));
+
         btnRefresh.setOnClickListener(v -> refreshDevices());
         btnStart.setOnClickListener(v -> {
             if (hasPermissions()) {
@@ -224,14 +229,15 @@ public class MainActivity extends Activity {
         addRadio(groupSource, "DEFAULT", MediaRecorder.AudioSource.DEFAULT, false);
         addRadio(groupSource, "UNPROCESSED", MediaRecorder.AudioSource.UNPROCESSED, false);
 
-        // SCO clásico (CVSD) es 8 kHz; varios HAL (Huawei) caen al mic interno con otra frecuencia.
-        addRadio(groupRate, "8 kHz", 8000, true);
-        addRadio(groupRate, "16 kHz", 16000, false);
+        addRadio(groupRate, "8 kHz", 8000, false);
+        addRadio(groupRate, "16 kHz", 16000, true);
         addRadio(groupRate, "48 kHz", 48000, false);
 
-        addRadio(groupMode, "IN_COMMUNICATION (VoIP)", AudioManager.MODE_IN_COMMUNICATION, true);
+        // NORMAL por defecto: en Huawei/EMUI, IN_COMMUNICATION manda la captura al mic interno
+        // aunque la ruta reporte SCO.
+        addRadio(groupMode, "NORMAL (recomendado)", AudioManager.MODE_NORMAL, true);
         addRadio(groupMode, "IN_CALL (llamada telefónica)", AudioManager.MODE_IN_CALL, false);
-        addRadio(groupMode, "NORMAL", AudioManager.MODE_NORMAL, false);
+        addRadio(groupMode, "IN_COMMUNICATION (VoIP)", AudioManager.MODE_IN_COMMUNICATION, false);
     }
 
     private void addRadio(RadioGroup group, String text, int value, boolean checked) {

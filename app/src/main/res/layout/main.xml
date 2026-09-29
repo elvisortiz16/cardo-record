@@ -11,7 +11,7 @@
 
         <TextView
             style="@style/SectionTitle"
-            android:text="1. Micrófono (¿desde dónde?)" />
+            android:text="Micrófono" />
 
         <RadioGroup
             android:id="@+id/groupDevice"
@@ -23,51 +23,6 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Actualizar lista" />
-
-        <TextView
-            style="@style/SectionTitle"
-            android:text="2. Cómo abrir la línea Bluetooth" />
-
-        <RadioGroup
-            android:id="@+id/groupMethod"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
-
-        <TextView
-            style="@style/SectionTitle"
-            android:text="3. Fuente de audio" />
-
-        <RadioGroup
-            android:id="@+id/groupSource"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
-
-        <TextView
-            style="@style/SectionTitle"
-            android:text="4. Frecuencia de muestreo" />
-
-        <RadioGroup
-            android:id="@+id/groupRate"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal" />
-
-        <TextView
-            style="@style/SectionTitle"
-            android:text="5. Modo de audio del sistema" />
-
-        <RadioGroup
-            android:id="@+id/groupMode"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
-
-        <CheckBox
-            android:id="@+id/chkPreferred"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:checked="true"
-            android:text="Forzar mic con setPreferredDevice (apágalo en Huawei si no funciona)" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -99,17 +54,12 @@
                 android:text="Escuchar" />
         </LinearLayout>
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Nivel de entrada (habla al Cardo y luego al teléfono)" />
-
         <ProgressBar
             android:id="@+id/level"
             style="?android:attr/progressBarStyleHorizontal"
             android:layout_width="match_parent"
             android:layout_height="24dp"
+            android:layout_marginTop="12dp"
             android:max="100" />
 
         <TextView
@@ -120,16 +70,76 @@
             android:text="Listo"
             android:textSize="16sp" />
 
-        <TextView
-            style="@style/SectionTitle"
-            android:text="Log" />
-
-        <TextView
-            android:id="@+id/log"
+        <CheckBox
+            android:id="@+id/chkAdvanced"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:fontFamily="monospace"
-            android:textIsSelectable="true"
-            android:textSize="11sp" />
+            android:layout_marginTop="24dp"
+            android:text="Opciones avanzadas" />
+
+        <LinearLayout
+            android:id="@+id/advanced"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                style="@style/SectionTitle"
+                android:text="Cómo abrir la línea Bluetooth" />
+
+            <RadioGroup
+                android:id="@+id/groupMethod"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
+
+            <TextView
+                style="@style/SectionTitle"
+                android:text="Fuente de audio" />
+
+            <RadioGroup
+                android:id="@+id/groupSource"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
+
+            <TextView
+                style="@style/SectionTitle"
+                android:text="Frecuencia de muestreo" />
+
+            <RadioGroup
+                android:id="@+id/groupRate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" />
+
+            <TextView
+                style="@style/SectionTitle"
+                android:text="Modo de audio del sistema" />
+
+            <RadioGroup
+                android:id="@+id/groupMode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
+
+            <CheckBox
+                android:id="@+id/chkPreferred"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:checked="true"
+                android:text="Forzar mic con setPreferredDevice" />
+
+            <TextView
+                style="@style/SectionTitle"
+                android:text="Log" />
+
+            <TextView
+                android:id="@+id/log"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:textIsSelectable="true"
+                android:textSize="11sp" />
+        </LinearLayout>
     </LinearLayout>
 </ScrollView>
