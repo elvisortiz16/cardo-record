@@ -21,6 +21,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.ProgressBar;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
@@ -71,6 +72,8 @@ public class MainActivity extends Activity {
     private RadioGroup groupMethod;
     private RadioGroup groupSource;
     private RadioGroup groupRate;
+    private RadioGroup groupMode;
+    private CheckBox chkPreferred;
     private Button btnStart;
     private Button btnStop;
     private Button btnPlay;
@@ -128,6 +131,8 @@ public class MainActivity extends Activity {
         groupMethod = findViewById(R.id.groupMethod);
         groupSource = findViewById(R.id.groupSource);
         groupRate = findViewById(R.id.groupRate);
+        groupMode = findViewById(R.id.groupMode);
+        chkPreferred = findViewById(R.id.chkPreferred);
         btnStart = findViewById(R.id.btnStart);
         btnStop = findViewById(R.id.btnStop);
         btnPlay = findViewById(R.id.btnPlay);
@@ -219,9 +224,14 @@ public class MainActivity extends Activity {
         addRadio(groupSource, "DEFAULT", MediaRecorder.AudioSource.DEFAULT, false);
         addRadio(groupSource, "UNPROCESSED", MediaRecorder.AudioSource.UNPROCESSED, false);
 
-        addRadio(groupRate, "8 kHz", 8000, false);
-        addRadio(groupRate, "16 kHz", 16000, true);
+        // SCO clásico (CVSD) es 8 kHz; varios HAL (Huawei) caen al mic interno con otra frecuencia.
+        addRadio(groupRate, "8 kHz", 8000, true);
+        addRadio(groupRate, "16 kHz", 16000, false);
         addRadio(groupRate, "48 kHz", 48000, false);
+
+        addRadio(groupMode, "IN_COMMUNICATION (VoIP)", AudioManager.MODE_IN_COMMUNICATION, true);
+        addRadio(groupMode, "IN_CALL (llamada telefónica)", AudioManager.MODE_IN_CALL, false);
+        addRadio(groupMode, "NORMAL", AudioManager.MODE_NORMAL, false);
     }
 
     private void addRadio(RadioGroup group, String text, int value, boolean checked) {
@@ -242,11 +252,12 @@ public class MainActivity extends Activity {
     }
 
     private void setOptionsEnabled(boolean enabled) {
-        for (RadioGroup g : new RadioGroup[]{groupDevice, groupMethod, groupSource, groupRate}) {
+        for (RadioGroup g : new RadioGroup[]{groupDevice, groupMethod, groupSource, groupRate, groupMode}) {
             for (int i = 0; i < g.getChildCount(); i++) {
                 g.getChildAt(i).setEnabled(enabled);
             }
         }
+        chkPreferred.setEnabled(enabled);
         btnRefresh.setEnabled(enabled);
     }
 
@@ -259,7 +270,8 @@ public class MainActivity extends Activity {
         StringBuilder found = new StringBuilder("Entradas:");
         for (AudioDeviceInfo d : audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
             found.append("\n  id=").append(d.getId()).append(" ").append(label(d));
-            if (d.getType() == AudioDeviceInfo.TYPE_TELEPHONY || d.getType() == AudioDeviceInfo.TYPE_FM_TUNER) {
+            if (d.getType() == AudioDeviceInfo.TYPE_TELEPHONY || d.getType() == AudioDeviceInfo.TYPE_FM_TUNER
+                    || d.getType() == AudioDeviceInfo.TYPE_REMOTE_SUBMIX) {
                 continue;
             }
             inputDevices.add(d);
@@ -367,8 +379,10 @@ public class MainActivity extends Activity {
         setOptionsEnabled(false);
         pendingInput = input;
 
+        int mode = selectedValue(groupMode, AudioManager.MODE_IN_COMMUNICATION);
         log("--- Iniciar: mic=" + (input != null ? label(input) : "por defecto")
-                + " método=" + method + " fuente=" + selectedValue(groupSource, -1) + " rate=" + sampleRate);
+                + " método=" + method + " fuente=" + selectedValue(groupSource, -1) + " rate=" + sampleRate
+                + " modo=" + mode + " preferred=" + chkPreferred.isChecked());
 
         if (!isBluetooth(input)) {
             setStatus("Usando " + (input != null ? label(input) : "mic por defecto"));
@@ -376,8 +390,12 @@ public class MainActivity extends Activity {
             return;
         }
 
-        audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
-        log("setMode(IN_COMMUNICATION) -> mode=" + audioManager.getMode());
+        try {
+            audioManager.setMode(mode);
+        } catch (SecurityException e) {
+            log("setMode(" + mode + ") rechazado: " + e.getMessage());
+        }
+        log("setMode(" + mode + ") -> mode=" + audioManager.getMode());
         waitingForLink = true;
         handler.postDelayed(linkTimeout, LINK_TIMEOUT_MS);
         setStatus("Abriendo línea de voz con " + label(input) + "...");
@@ -405,8 +423,8 @@ public class MainActivity extends Activity {
         scoReceiverRegistered = true;
         usedLegacy = true;
         log("isBluetoothScoAvailableOffCall=" + audioManager.isBluetoothScoAvailableOffCall());
+        // setBluetoothScoOn(true) se llama al recibir CONNECTED (algunos HAL lo ignoran antes).
         audioManager.startBluetoothSco();
-        audioManager.setBluetoothScoOn(true);
         log("startBluetoothSco() llamado");
     }
 
@@ -457,7 +475,11 @@ public class MainActivity extends Activity {
         }
         waitingForLink = false;
         handler.removeCallbacks(linkTimeout);
-        log("Línea BT lista; isBluetoothScoOn=" + audioManager.isBluetoothScoOn());
+        if (usedLegacy) {
+            audioManager.setBluetoothScoOn(true);
+        }
+        log("Línea BT lista; isBluetoothScoOn=" + audioManager.isBluetoothScoOn()
+                + " mode=" + audioManager.getMode());
         handler.postDelayed(() -> {
             if (pendingInput != null && !isRecording) {
                 startRecording(findSameInput(pendingInput));
@@ -500,7 +522,9 @@ public class MainActivity extends Activity {
             stopAll();
             return;
         }
-        if (input != null) {
+        log("AudioRecord: fuente=" + recorder.getAudioSource() + " rate=" + recorder.getSampleRate()
+                + " buffer=" + bufferSize);
+        if (input != null && chkPreferred.isChecked()) {
             boolean ok = recorder.setPreferredDevice(input);
             log("setPreferredDevice(" + label(input) + ") -> " + ok);
         }
